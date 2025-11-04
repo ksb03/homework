@@ -1,0 +1,174 @@
+import RPi.GPIO as GPIO
+import serial
+import threading
+import time
+
+PWMA = 18
+AIN1 = 22
+AIN2 = 27
+PWMB = 23
+BIN1 = 25
+BIN2 = 24
+
+speed = 80
+turn_speed = 50
+
+port = '/dev/ttyS0'
+baud = 9600
+
+data = ""
+data_lock = threading.Lock()
+running = True
+
+# GPIO 초기화
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BCM)
+
+GPIO.setup(PWMA, GPIO.OUT)
+GPIO.setup(AIN1, GPIO.OUT)
+GPIO.setup(AIN2, GPIO.OUT)
+GPIO.setup(PWMB, GPIO.OUT)
+GPIO.setup(BIN1, GPIO.OUT)
+GPIO.setup(BIN2, GPIO.OUT)
+
+Lmotor = GPIO.PWM(PWMA, 500)
+Rmotor = GPIO.PWM(PWMB, 500)
+Lmotor.start(0)
+Rmotor.start(0)
+
+
+def move(left_dir, right_dir, left_speed, right_speed):
+    GPIO.output(AIN1, not left_dir)
+    GPIO.output(AIN2, left_dir)
+    GPIO.output(BIN1, not right_dir)
+    GPIO.output(BIN2, right_dir)
+    Lmotor.ChangeDutyCycle(abs(left_speed))
+    Rmotor.ChangeDutyCycle(abs(right_speed))
+
+
+def forward():
+    move(True, True, speed, speed)
+
+
+def backward():
+    move(False, False, speed, speed)
+
+
+def left():
+    move(False, True, speed, speed)
+
+
+def right():
+    move(True, False, speed, speed)
+
+
+def stop():
+    move(True, True, 0, 0)
+
+
+def parse_signal(sig):
+    try:
+        sig = sig.replace("J0:", "")
+        a, b = sig.split(",")
+        return float(a), float(b)
+    except:
+        return None, None
+
+def move_by_angle(angle, mag):
+    if mag < 0.1:
+        stop()
+        return "Stop"
+
+    angle = angle % 360
+
+    if 67.5 <= angle < 112.5:
+        forward()
+        return "Forward"
+    elif 247.5 <= angle < 292.5:
+        backward()
+        return "Backward"
+    elif 157.5 <= angle < 202.5:
+        left()
+        return "Left"
+    elif 337.5 <= angle or angle < 22.5:
+        right()
+        return "Right"
+    elif 22.5 <= angle < 67.5:
+        move(True, True, speed, turn_speed)
+        return "Forward-Right"
+    elif 112.5 <= angle < 157.5:
+        move(True, True, turn_speed, speed)
+        return "Forward-Left"
+    elif 202.5 <= angle < 247.5:
+        move(False, False, turn_speed, speed)
+        return "Backward-Left"
+    elif 292.5 <= angle < 337.5:
+        move(False, False, speed, turn_speed)
+        return "Backward-Right"
+
+
+def serial_read():
+    global data, running
+    try:
+        ser = serial.Serial(port, baud, timeout=1)
+    except:
+        print("Serial connection error")
+        return
+
+    while running:
+        if ser.in_waiting > 0:
+            try:
+                line = ser.readline().decode().strip()
+                if line:
+                    with data_lock:
+                        data = line
+            except:
+                pass
+        time.sleep(0.05)
+
+    ser.close()
+
+
+def buzzer_on():
+    pass  
+
+
+def buzzer_off():
+    pass 
+
+
+def main():
+    global data, running
+    move_state = "Stop"
+    horn = "Off"
+    buzzer_time = 0
+
+    while running:
+        now = time.time()
+        with data_lock:
+            d = data
+            data = ""
+
+        if d:
+            if d.startswith("J0:"):
+                a, m = parse_signal(d)
+                if a is not None:
+                    move_state = move_by_angle(a, m)
+            elif d.startswith("B0"):
+                buzzer_on()
+                buzzer_time = now
+                horn = "On"
+
+        print(f"\rMove: {move_state:<15} | Horn: {horn}", end="", flush=True)
+        time.sleep(0.05)
+
+try:
+    t1 = threading.Thread(target=serial_read, daemon=True)
+    t1.start()
+    main()
+except KeyboardInterrupt:
+    running = False
+    stop()
+    buzzer_off()
+    GPIO.cleanup()
+    print("\nProgram stopped")
